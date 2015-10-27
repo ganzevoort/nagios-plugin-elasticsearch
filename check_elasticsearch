@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import base64
 import urllib2
 
 from nagioscheck import NagiosCheck, UsageError
@@ -92,9 +93,21 @@ class ElasticSearchCheck(NagiosCheck):
         self.add_option('y', 'yellow-critical', 'yellow_critical',
                         "Have plugin issue critical alert on yellow cluster state. Defaults to False.")
 
+        self.add_option('s', 'ssl', None,
+                        "Enable SSL communications")
+
+        self.add_option('U', 'username', 'username',
+                        "HTTP Basic Auth Username")
+
+        self.add_option('P', 'password', 'password',
+                        "HTTP Basic Auth Password")
+
     def check(self, opts, args):
         host = opts.host or "localhost"
         port = int(opts.port or '9200')
+        ssl = opts.s
+        username = opts.username or None
+        password = opts.password or None
         prefix = opts.prefix or ""
         if not prefix.endswith('/'):
             prefix += '/'
@@ -122,9 +135,19 @@ class ElasticSearchCheck(NagiosCheck):
         # Data retrieval
         #
 
+        if ssl:
+            proto = 'https'
+        else:
+            proto = 'http'
+
+        if type(username) is str and type(password) is not str:
+                raise UsageError("Username must be accompanied with a password.")
+
+        base_url = r'%s://%s:%d' % (proto, host, port)
+
         # Request "about" info, so we can figure out the ES version,
         # to allow for version-specific API changes.
-        es_about = get_json(r'http://%s:%d/%s' % (host, port, prefix))
+        es_about = get_json(r'%s/%s' % (base_url, prefix), username, password)
         es_version = es_about['version']['number']
 
         # Request cluster 'health'.  /_cluster/health is like a tl;dr 
@@ -132,8 +155,8 @@ class ElasticSearchCheck(NagiosCheck):
         # information here.  We are primarily interested in ES' cluster 
         # 'health colour':  a little rating ES gives itself to describe 
         # how much pain it is in.
-        es_health = get_json(r'http://%s:%d/%s_cluster/health' %
-                             (host, port, prefix))
+        es_health = get_json(r'%s/%s_cluster/health' %
+                             (base_url, prefix), username, password)
 
         their_health = HEALTH[es_health['status'].lower()]
 
@@ -141,14 +164,14 @@ class ElasticSearchCheck(NagiosCheck):
         # Here, we can see a list of all nodes, indexes, and shards in 
         # the cluster.  This response will also contain a map detailing 
         # where all shards are living at this point in time.
-        es_state = get_json(r'http://%s:%d/%s_cluster/state' %
-                            (host, port, prefix))
+        es_state = get_json(r'%s/%s_cluster/state' %
+                            (base_url, prefix), username, password)
 
         # Request a bunch of useful numbers that we export as perfdata.  
         # Details like the number of get, search, and indexing 
         # operations come from here.
-        es_stats = get_json(r'http://%s:%d/%s_nodes/_local/'
-                            'stats?all=true' % (host, port, prefix))
+        es_stats = get_json(r'%s/%s_nodes/_local/'
+                            'stats?all=true' % (base_url, prefix), username, password)
 
         myid = es_stats['nodes'].keys()[0]
 
@@ -590,13 +613,21 @@ def booleanise(b):
     raise ValueError("I don't know how to coerce %r to a bool" % b)
 
 
-def get_json(uri):
+def get_json(uri,username=None, password=None):
     try:
-        f = urllib2.urlopen(uri)
+        request = urllib2.Request(uri)
+        base64string = base64.encodestring('%s:%s' % (username, password)).replace('\n', '')
+        request.add_header("Authorization", "Basic %s" % base64string)
+        f = urllib2.urlopen(request)
     except urllib2.HTTPError, e:
-        raise Status('unknown', ("API failure",
-                                 None,
-                                 "API failure:\n\n%s" % str(e)))
+        if e.code == 401:
+            raise Status('unknown', ("HTTP Error 401: Unauthorized",
+                                     None,
+                                     "HTTP Error 401: Unauthorized:\n\n%s" % str(e)))
+        else:
+            raise Status('unknown', ("API failure",
+                                     None,
+                                     "API failure:\n\n%s" % str(e)))
     except urllib2.URLError, e:
         # The server could be down; make this CRITICAL.
         raise Status('critical', (e.reason,))
