@@ -3,6 +3,8 @@
 import base64
 import urllib2
 
+import ssl
+
 from nagioscheck import NagiosCheck, UsageError
 from nagioscheck import PerformanceMetric, Status
 
@@ -109,7 +111,7 @@ class ElasticSearchCheck(NagiosCheck):
         username = opts.username or None
         password = opts.password or None
         prefix = opts.prefix or ""
-        if not prefix.endswith('/'):
+        if prefix and not prefix.endswith('/'):
             prefix += '/'
 
         failure_domain = []
@@ -139,15 +141,20 @@ class ElasticSearchCheck(NagiosCheck):
             proto = 'https'
         else:
             proto = 'http'
+        ssl_verify = (host != 'localhost')
 
         if type(username) is str and type(password) is not str:
                 raise UsageError("Username must be accompanied with a password.")
 
-        base_url = r'%s://%s:%d' % (proto, host, port)
+        base_url = r'%s://%s:%d/%s' % (proto, host, port, prefix)
+        connection = Connect(
+                base_url,
+                username=username, password=password,
+                verify=ssl_verify)
 
         # Request "about" info, so we can figure out the ES version,
         # to allow for version-specific API changes.
-        es_about = get_json(r'%s/%s' % (base_url, prefix), username, password)
+        es_about = connection.get_json(r'')
         es_version = es_about['version']['number']
 
         # Request cluster 'health'.  /_cluster/health is like a tl;dr 
@@ -155,8 +162,7 @@ class ElasticSearchCheck(NagiosCheck):
         # information here.  We are primarily interested in ES' cluster 
         # 'health colour':  a little rating ES gives itself to describe 
         # how much pain it is in.
-        es_health = get_json(r'%s/%s_cluster/health' %
-                             (base_url, prefix), username, password)
+        es_health = connection.get_json(r'_cluster/health')
 
         their_health = HEALTH[es_health['status'].lower()]
 
@@ -164,14 +170,12 @@ class ElasticSearchCheck(NagiosCheck):
         # Here, we can see a list of all nodes, indexes, and shards in 
         # the cluster.  This response will also contain a map detailing 
         # where all shards are living at this point in time.
-        es_state = get_json(r'%s/%s_cluster/state' %
-                            (base_url, prefix), username, password)
+        es_state = connection.get_json(r'_cluster/state')
 
         # Request a bunch of useful numbers that we export as perfdata.  
         # Details like the number of get, search, and indexing 
         # operations come from here.
-        es_stats = get_json(r'%s/%s_nodes/_local/'
-                            'stats?all=true' % (base_url, prefix), username, password)
+        es_stats = connection.get_json(r'_nodes/stats/_all')
 
         myid = es_stats['nodes'].keys()[0]
 
@@ -613,33 +617,42 @@ def booleanise(b):
     raise ValueError("I don't know how to coerce %r to a bool" % b)
 
 
-def get_json(uri,username=None, password=None):
-    try:
-        request = urllib2.Request(uri)
-        base64string = base64.encodestring('%s:%s' % (username, password)).replace('\n', '')
-        request.add_header("Authorization", "Basic %s" % base64string)
-        f = urllib2.urlopen(request)
-    except urllib2.HTTPError, e:
-        if e.code == 401:
-            raise Status('unknown', ("HTTP Error 401: Unauthorized",
-                                     None,
-                                     "HTTP Error 401: Unauthorized:\n\n%s" % str(e)))
-        else:
-            raise Status('unknown', ("API failure",
-                                     None,
-                                     "API failure:\n\n%s" % str(e)))
-    except urllib2.URLError, e:
-        # The server could be down; make this CRITICAL.
-        raise Status('critical', (e.reason,))
+class Connect(object):
+    def __init__(self, base_url, username=None, password=None, verify=True):
+        self.base_url = base_url
+        self.base64string = base64.encodestring('%s:%s' % (username, password)).replace('\n', '')
+        self.ctx = ssl.create_default_context()
+        if not verify:
+            self.ctx.check_hostname = False
+            self.ctx.verify_mode = ssl.CERT_NONE
 
-    body = f.read()
+    def get_json(self, path):
+        uri = r'%s%s' % (self.base_url, path)
+        try:
+            request = urllib2.Request(uri)
+            request.add_header("Authorization", "Basic %s" % self.base64string)
+            f = urllib2.urlopen(request, context=self.ctx)
+        except urllib2.HTTPError, e:
+            if e.code == 401:
+                raise Status('unknown', ("HTTP Error 401: Unauthorized",
+                                         None,
+                                         "HTTP Error 401: Unauthorized:\n\n%s" % str(e)))
+            else:
+                raise Status('unknown', ("API failure",
+                                         None,
+                                         "API failure:\n\n%s" % str(e)))
+        except urllib2.URLError, e:
+            # The server could be down; make this CRITICAL.
+            raise Status('critical', (e.reason,))
 
-    try:
-        j = json.loads(body)
-    except ValueError:
-        raise Status('unknown', ("API returned nonsense",))
+        body = f.read()
 
-    return j
+        try:
+            j = json.loads(body)
+        except ValueError:
+            raise Status('unknown', ("API returned nonsense",))
+
+        return j
 
 
 def version(version_string):

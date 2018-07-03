@@ -76,6 +76,11 @@ Options:
                         state, issue a 'critical' alert. Allows for greater
                         control of alerting for clusters that may be of 
                         greater sensitivity (or fragility). Defaults to False.
+  -s, --ssl             Enable SSL communications
+  -U USERNAME, --username=USERNAME
+                        HTTP Basic Auth Username
+  -P PASSWORD, --password=PASSWORD
+                        HTTP Basic Auth Password
 
 ```
 
@@ -85,4 +90,4 @@ Requirements
 - Python 2.5 (with simplejson), 2.6, or 2.7
 - [pynagioscheck][]
 
-[pynagioscheck]: https://github.com/saj/pynagioscheck
+[pynagioscheck]: https://github.com/PeerJ/pynagioscheck
